@@ -7,36 +7,8 @@ import dlite
 from dlite.utils import instance_from_dict
 
 sys.path.append(str(Path.home() / 'prosjekter/EMMC/OntoTrans/Interfaces/oteapi'))
-#import app
+import app
 
-
-# Set up some paths
-thisdir = Path(__file__).parent
-
-#config = app.models.resourceconfig.ResourceConfig(
-#    downloadUrl=('https://file-examples-com.github.io/uploads/2017/02/'
-#                 'file_example_XLSX_10.xlsx'),
-#    mediaType=('application/vnd.openxmlformats-officedocument.'
-#               'spreadsheetml.sheet'),
-#    configuration = {
-#        "worksheet": 'Sheet1',
-#        "row_to": 10,
-#        "col_to": 8,
-#        "header_positions": ["A1", "B1", "C1", "D1", "E1", "F6", "G1", "H1"],
-#    },
-#)
-#parser = app.strategy.iparsestrategy.create_parse_strategy(config)
-#output = parser.parse()
-
-
-# Quick load into numpy structured array
-import pandas as pd
-rawdata = pd.read_excel(thisdir / 'rawdata.xlsx').to_numpy()
-data = np.rec.fromrecords(
-    rawdata[1:],
-    names='Sample,RunID,limp24h,imp24h,limp2h,imp2h,'
-    'Ecorr,icorr,Beta_a,Beta_c,fit_error,'
-    'LPR30min,LPR1h,LPR2h,LPR3h,LPR6h,LPR12h,LPR18h,LPR24h')
 
 datamodel = {
     "uri": "http://vipcoat.eu/meta/0.1/sample",
@@ -153,11 +125,15 @@ datamodel = {
         }
     ]
 }
-meta = instance_from_dict(datamodel)
 
 
 class UnexpectedExcelFormatError(Exception):
     """Excel file has an unexpected format."""
+
+
+def get_metadata():
+    """Returns excel metadata."""
+    return instance_from_dict(datamodel)
 
 
 def parse_runid(runid):
@@ -215,7 +191,7 @@ def parse_time_label(label, prefix):
     return float(value) * to_seconds(unit) / 3600
 
 
-def parse_rawdata(data : np.recarray) -> dlite.Instance:
+def parse_rawdata_recarray(data : np.recarray) -> dlite.Instance:
     """Parses a rawdata excel sheet represented as a numpy recarray.
 
     The results are provided as a collection of dlite sample entities.
@@ -246,6 +222,7 @@ def parse_rawdata(data : np.recarray) -> dlite.Instance:
         for j, label in enumerate(lpr_labels):
             LPR[j] = d[label]
 
+        meta = get_metadata()
         inst = meta([nruns, nimp, nlpr])
         inst.Sample = d.Sample[0]
         inst.RunID = d.RunID
@@ -269,7 +246,28 @@ def parse_rawdata(data : np.recarray) -> dlite.Instance:
     return coll
 
 
-coll = parse_rawdata(data)
+def load_rawdata():
+    newHeader = (
+        "Sample,RunID,limp24h,imp24h,limp2h,imp2h,"
+        "Ecorr,icorr,Beta_a,Beta_c,fit_error,"
+        "LPR30min,LPR1h,LPR2h,LPR3h,LPR6h,LPR12h,LPR18h,LPR24h")
+    config = app.models.resourceconfig.ResourceConfig(
+        #downloadUrl=('https://file-examples-com.github.io/uploads/2017/02/'
+        #             'file_example_XLSX_10.xlsx'),
+        downloadUrl=('file://rawdata.xlsx'),
+        mediaType=('application/vnd.openxmlformats-officedocument.'
+                   'spreadsheetml.sheet'),
+        configuration = {
+            "worksheet": "data",
+            "row_from": 3,
+            "newHeader": newHeader.split(","),
+        },
+    )
+    parser = app.strategy.iparsestrategy.create_parse_strategy(config)
+    output = parser.parse_recarray()
+    rec = output["data"]
+    return rec
 
-inst = coll.get('sample0')
-print(inst)
+
+if __name__ == "__main__":
+    rec = load_rawdata()
