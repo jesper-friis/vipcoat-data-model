@@ -1,4 +1,5 @@
 import sys
+import re
 from pathlib import Path
 
 import numpy as np
@@ -33,8 +34,8 @@ import pandas as pd
 rawdata = pd.read_excel(thisdir / 'rawdata.xlsx').to_numpy()
 data = np.rec.fromrecords(
     rawdata[1:],
-    names='Sample,RunID,EIS,limp24h,imp24h,limp2h,imp2h,'
-    'Ecorr,icorr,Beta_a,Beta_c,error,'
+    names='Sample,RunID,limp24h,imp24h,limp2h,imp2h,'
+    'Ecorr,icorr,Beta_a,Beta_c,fit_error,'
     'LPR30min,LPR1h,LPR2h,LPR3h,LPR6h,LPR12h,LPR18h,LPR24h')
 
 datamodel = {
@@ -92,14 +93,14 @@ datamodel = {
         {
             "name": "log_impedance",
             "type": "float64",
-            "dims": ["nruns", "nimp"],
+            "dims": ["nimp", "nruns"],
             "unit": "log(Ohm)",
             "description": "Logarithm of measured impedance for each run and time.",
         },
         {
             "name": "impedance",
             "type": "float64",
-            "dims": ["nruns", "nimp"],
+            "dims": ["nimp", "nruns"],
             "unit": "Ohm",
             "description": "Measured impedance for each run and time.",
         },
@@ -147,9 +148,128 @@ datamodel = {
         {
             "name": "LPR",
             "type": "float64",
-            "dims": ["nruns", "nlpr"],
+            "dims": ["nlpr", "nruns"],
             "description": "LPR for each run and time.",
         }
     ]
 }
 meta = instance_from_dict(datamodel)
+
+
+class UnexpectedExcelFormatError(Exception):
+    """Excel file has an unexpected format."""
+
+
+def parse_runid(runid):
+    """Parse `runid` and return a ``(date, composition, substrate)`` tuple."""
+    tokens = runid.split('_')
+    if len(tokens) == 3:
+        date, composition, _ = tokens
+        substrate = ''
+    elif len(tokens) == 4:
+        date, composition, substrate, _ = tokens
+    elif len(tokens) == 5:
+        date, comp1, comp2, substrate, _ = tokens
+        composition = comp1 + '_' + comp2
+    else:
+        raise UnexpectedExcelFormatError(f'Unexpected runid: {runid}')
+    return date, composition, substrate
+
+
+def to_seconds(unit):
+    """Returns number of seconds that time unit `unit` corresponds to."""
+    if unit in ('s', 'second'):
+        return 1
+    elif unit in ('M', 'min'):
+        return 60
+    elif unit in ('h', 'hour'):
+        return 3600
+    elif unit == 'day':
+        return 3600 * 24
+    elif unit == 'month':
+        return 3600 * 24 * 30
+    elif unit == 'year':
+        return 3600 * 24 * 365.25
+    else:
+        raise UnexpectedExcelFormatError(f'Unknown time unit: {unit}')
+
+
+def parse_time_label(label, prefix):
+    """Parse (impedance or lpr) label and return the number of hours it encode.
+    The label should be of the form
+
+        <prefix><N><unit>
+
+    where
+    - <prefix> shold match `prefix`
+    - <N> is a number
+    - <unit> is a time unit
+    """
+    m = re.match(
+        f'^{prefix}(\d+)(s|second|min|h|hour|day|month|year)s?$', label)
+    if not m:
+        raise UnexpectedExcelFormatError(
+            f'Unexpected impedance label: "{label}". '
+            f'Should start with "{prefix}"')
+    value, unit = m.groups()
+    return float(value) * to_seconds(unit) / 3600
+
+
+def parse_rawdata(data : np.recarray) -> dlite.Instance:
+    """Parses a rawdata excel sheet represented as a numpy recarray.
+
+    The results are provided as a collection of dlite sample entities.
+    """
+    coll = dlite.Collection()
+
+    start, = np.nonzero(data.Sample != 'nan')
+    end, = np.nonzero(data.RunID == 'AVG')
+    if len(start) != len(end):
+        raise UnexpectedExcelFormatError(
+            f'Number of sample labels (={len(start)}) does not match number '
+            f'of RunID "AVG" strings (={len(end)}).')
+
+    imp_labels = [name for name in data.dtype.names if name.startswith('imp')]
+    lpr_labels = [name for name in data.dtype.names if name.startswith('LPR')]
+    nimp = len(imp_labels)
+    nlpr = len(lpr_labels)
+    for i, (m, n) in enumerate(zip(start, end)):
+        d = data[m:n]
+        nruns = n - m
+        date, composition, substrate = zip(*[parse_runid(r) for r in d.RunID])
+        log_imp = np.zeros((nimp, nruns))
+        imp = np.zeros((nimp, nruns))
+        for j, label in enumerate(imp_labels):
+            log_imp[j] = d['l' + label]
+            imp[j] = d[label]
+        LPR = np.zeros((nlpr, nruns))
+        for j, label in enumerate(lpr_labels):
+            LPR[j] = d[label]
+
+        inst = meta([nruns, nimp, nlpr])
+        inst.Sample = d.Sample[0]
+        inst.RunID = d.RunID
+        inst.date = date
+        inst.composition = composition
+        inst.substrate = substrate
+        inst.impedance_time = [parse_time_label(label, 'imp')
+                               for label in imp_labels]
+        inst.log_impedance = log_imp
+        inst.impedance = imp
+        inst.Ecorr = d.Ecorr
+        inst.icorr = d.icorr
+        inst.Beta_a = d.Beta_a
+        inst.Beta_c = d.Beta_c
+        inst.fit_error = d.fit_error
+        inst.LPR_time = [parse_time_label(label, 'LPR')
+                         for label in lpr_labels]
+        inst.LPR = LPR
+        coll.add(f'sample{i}', inst)
+
+    return coll
+
+
+coll = parse_rawdata(data)
+
+inst = coll.get('sample0')
+print(inst)
